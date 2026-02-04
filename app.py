@@ -3,6 +3,43 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from pmdarima import auto_arima
+from prophet import Prophet
+
+def generate_forecast(df, category, horizon=30, model_type="ARIMA"):
+    sub = df[df["category"] == category].copy()
+    sub = sub[["year", "pct_change_since_2000"]].reset_index(drop=True)
+    sub.rename(columns={"pct_change_since_2000": "value"}, inplace=True)
+
+    # Forecast years
+    future_years = np.arange(sub["year"].max() + 1, sub["year"].max() + horizon + 1)
+
+    if model_type == "ARIMA":
+        model = auto_arima(sub["value"], seasonal=False, error_action="ignore")
+        fc = model.predict(horizon)
+        return pd.DataFrame({"year": future_years, "forecast": fc})
+
+    elif model_type == "Prophet":
+        dfp = sub.rename(columns={"year": "ds", "value": "y"})
+        dfp["ds"] = pd.to_datetime(dfp["ds"], format="%Y")
+        m = Prophet()
+        m.fit(dfp)
+
+        future = m.make_future_dataframe(periods=horizon, freq="Y")
+        forecast = m.predict(future)
+        fc = forecast.tail(horizon)
+
+        return pd.DataFrame({
+            "year": fc["ds"].dt.year,
+            "forecast": fc["yhat"]
+        })
+
+    else:  # Simple exponential smoothing
+        from statsmodels.tsa.holtwinters import SimpleExpSmoothing
+        model = SimpleExpSmoothing(sub["value"]).fit()
+        fc = model.forecast(horizon)
+        return pd.DataFrame({"year": future_years, "forecast": fc})
+
 
 # -----------------------------------------
 # CONFIG
@@ -45,6 +82,14 @@ year_range = st.sidebar.slider(
 )
 
 show_yoy = st.sidebar.checkbox("Show YoY Inflation Instead of Cumulative %", value=False)
+
+
+
+st.sidebar.markdown("### 🔮 Forecasting Options")
+enable_forecast = st.sidebar.checkbox("Enable Forecasting", value=True)
+forecast_model = st.sidebar.selectbox("Forecast Model", ["ARIMA", "Prophet", "Simple"])
+forecast_horizon = st.sidebar.slider("Forecast Horizon (Years)", 5, 30, 20)
+
 
 # Scenario adjustments
 st.sidebar.subheader("Projection Scenario (2026–2045)")
@@ -89,25 +134,77 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # -----------------------------------------
 # TAB 1 — Category Explorer
 # -----------------------------------------
+
 with tab1:
-    st.subheader("📈 Category-Level Inflation Trend")
+    st.subheader("📈 Category-Level Inflation Trend with Forecasting")
 
     metric = "yoy" if show_yoy else "pct_change_since_2000"
     ylabel = "YoY Inflation (%)" if show_yoy else "Cumulative % Change vs 2000"
 
-    fig = px.line(
-        df_display,
-        x="year",
-        y=metric,
-        color="category",
-        markers=True,
-        title="Inflation Trend by Category",
-        labels={"year": "Year", metric: ylabel},
+    fig = go.Figure()
+
+    # Plot actual data
+    for cat in selected_categories:
+        sub = df_display[df_display["category"] == cat]
+        fig.add_trace(go.Scatter(
+            x=sub["year"],
+            y=sub[metric],
+            mode="lines+markers",
+            name=f"{cat} – Actual"
+        ))
+
+        # Forecast overlay
+        if enable_forecast:
+            fc = generate_forecast(df_plot, cat, forecast_horizon, forecast_model)
+            fig.add_trace(go.Scatter(
+                x=fc["year"],
+                y=fc["forecast"],
+                mode="lines",
+                line=dict(dash="dash"),
+                name=f"{cat} – Forecast"
+            ))
+
+    # Highlight current year
+    current_year = df["year"].max()
+    fig.add_vline(
+        x=current_year,
+        line_width=3,
+        line_dash="dot",
+        line_color="red",
+        annotation_text=f"Current Year: {current_year}",
+        annotation_position="top"
     )
-    fig.update_layout(height=550, legend_title_text="Category")
+
+    # Highlight datapoints at current year
+    current_points = df_plot[df_plot["year"] == current_year]
+    fig.add_trace(go.Scatter(
+        x=current_points["year"],
+        y=current_points[metric],
+        mode="markers",
+        marker=dict(size=12, color="red"),
+        name="Current Year Points"
+    ))
+
+    fig.update_layout(
+        height=600,
+        title="Inflation Trend + Forecast",
+        xaxis_title="Year",
+        yaxis_title=ylabel,
+    )
+
     st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------------------
+
+# -----
+    st.markdown(
+    f"""
+    <div style='padding:10px; background:#eef; border-radius:8px; text-align:center;'>
+        <b>📌 Timeline Marker:</b> Showing actual data through <span style='color:red'>{current_year}</span> and forecast thereafter.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+#-----------------------------------
 # TAB 2 — Services vs Goods Split
 # -----------------------------------------
 with tab2:
